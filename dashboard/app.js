@@ -1,7 +1,9 @@
-// Token Radar's dashboard, radar-3. It reads window.RADAR (written beside dashboard/ by main.ts) and
+// Token Radar's dashboard, radar-4. It reads window.RADAR (written beside dashboard/ by main.ts) and
 // renders the ranked board, a filterable table, a per-protocol detail view with the model's own inputs,
 // the protocol's farm plan and its farm economics, a Method tab that shows the fitted size curve, its
-// leave-one-out check and the comps it was fitted from, and a sandbox that re-runs the model with
+// leave-one-out check, its blind forward test and the comps it was fitted from, a Set aside tab that
+// lists every live-token comp, an Excluded tab that sets aside every pre-token protocol the ranking
+// rule leaves out with the rule that left it out, and a sandbox that re-runs the model with
 // different constants. No network: every byte it shows is in data.js. The page recomputes each row
 // from the snapshot figures, so the page's code and the board's data are visibly the same arithmetic.
 (function () {
@@ -212,7 +214,7 @@
     state.category = params.get('category') || 'all';
     state.watchlist = params.get('w') === '1';
     var tab = params.get('tab') || 'pre-token';
-    state.tab = (tab === 'pre-token' || tab === 'live' || tab === 'method') ? tab : 'pre-token';
+    state.tab = (tab === 'pre-token' || tab === 'live' || tab === 'excluded' || tab === 'method') ? tab : 'pre-token';
     state.sort = params.get('sort') || 'implied';
     state.dir = params.get('dir') === '1' ? 1 : -1;
   }
@@ -349,14 +351,15 @@
     wl.querySelector('input').addEventListener('change', function (e) { state.watchlist = e.target.checked; writeHash(); render(); });
     var pre = el('button', { type: 'button', 'aria-pressed': state.tab === 'pre-token' ? 'true' : 'false', text: 'Pre-token', onclick: function () { state.tab = 'pre-token'; render(); } });
     var live = el('button', { type: 'button', 'aria-pressed': state.tab === 'live' ? 'true' : 'false', text: 'Set aside', onclick: function () { state.tab = 'live'; render(); } });
+    var excluded = el('button', { type: 'button', 'aria-pressed': state.tab === 'excluded' ? 'true' : 'false', text: 'Excluded', onclick: function () { state.tab = 'excluded'; render(); } });
     var method = el('button', { type: 'button', 'aria-pressed': state.tab === 'method' ? 'true' : 'false', text: 'Method', onclick: function () { state.tab = 'method'; render(); } });
-    var shown = state.tab === 'pre-token' ? rows().length + ' rows shown' : state.tab === 'live' ? DATA.live.length + ' live-token protocols' : 'model, validation and sandbox';
+    var shown = state.tab === 'pre-token' ? rows().length + ' rows shown' : state.tab === 'live' ? DATA.live.length + ' live-token protocols' : state.tab === 'excluded' ? DATA.excluded.length + ' pre-token protocols set aside' : 'model, validation and sandbox';
     if (sandboxActive() && state.tab === 'pre-token') shown += ' · sandbox values';
     return el('div', { class: 'controls' },
       el('div', { class: 'field' }, el('label', { for: 'q', text: 'Search' }), search),
       el('div', { class: 'field' }, el('label', { for: 'category', text: 'Category' }), select),
       wl,
-      el('div', { class: 'field' }, el('span', { class: 'sub', text: 'Token status' }), el('div', { class: 'tabs' }, pre, live, method)),
+      el('div', { class: 'field' }, el('span', { class: 'sub', text: 'Token status' }), el('div', { class: 'tabs' }, pre, live, excluded, method)),
       el('span', { class: 'count', text: shown })
     );
   }
@@ -453,6 +456,27 @@
     );
   }
 
+  function excludedTable() {
+    var tbody = el('tbody');
+    DATA.excluded.forEach(function (r) {
+      tbody.appendChild(el('tr', null,
+        el('td', { class: 'num', text: 'set aside' }),
+        el('td', null, el('div', { class: 'name' }, el('b', { text: r.name }), el('span', { class: 'sub', text: (r.category || 'Other') + ' on ' + (r.chains && r.chains.length ? r.chains.slice(0, 2).join(', ') : 'an unnamed chain') }))),
+        el('td', { class: 'num', text: fmtUsd(r.tvl_usd) }),
+        el('td', null, el('span', { class: 'status', text: r.reason }))
+      ));
+    });
+    return el('div', { class: 'panel' },
+      el('div', { class: 'table-wrap' },
+        el('table', null,
+          el('caption', { class: 'sub', text: 'Pre-token, but set aside from the ranking: the watchlist\u2019s own rule leaves these out — an exchange, a bridge, a liquid-staking product, a versioned pool, or a wrapped or staked product of a token that already trades. Each row names the rule that left it out, so nothing the snapshot holds is hidden.' }),
+          el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Status' }), el('th', { scope: 'col', text: 'Protocol' }), el('th', { scope: 'col', text: 'TVL' }), el('th', { scope: 'col', text: 'Why set aside' }))),
+          tbody
+        )
+      )
+    );
+  }
+
   // The model applied to the top row, worked out in the open, and how much of the board each
   // factor carries. Everything is read from DATA, so the example can never disagree with
   // board.json: the numbers are the row's own, not a second copy of them.
@@ -521,6 +545,8 @@
   function looPanel() {
     var f = DATA.fit;
     var m = DATA.model;
+    var b = f.blind;
+    var a = DATA.audit;
     var pct = function (x) { return Math.round(x * 100) + '%'; };
     var miss = function (x) { return 'x' + x.toFixed(1); };
     var top = DATA.rows[0];
@@ -530,6 +556,8 @@
     return el('section', { class: 'panel model' },
       el('h2', { text: 'How well the curve holds up' }),
       el('p', { class: 'sub', text: 'Leave-one-out over the ' + f.n_comps + ' live-token comps: refit the curve and the factor without each protocol, then predict it. This model lands within 3x for ' + pct(f.loo_within3x) + ' of them, median miss ' + miss(f.loo_median_miss) + '. One flat multiple manages ' + pct(f.flat_within3x) + ', median miss ' + miss(f.flat_median_miss) + '. The middle half of launches land between ' + f.loo_p25.toFixed(2) + 'x and ' + f.loo_p75.toFixed(2) + 'x of the curve, so every row carries that range beside its number. A model this wide is a rough anchor, not a price.' }),
+      el('p', { class: 'sub', text: 'Tested blind: the curve fitted only on the ' + b.n_train + ' launches listed before ' + b.cut.slice(0, 4) + ' predicted the ' + b.n_test + ' listed since within 3x for ' + pct(b.within3x) + ' of them, median miss ' + miss(b.median_miss) + '. Nothing in the test set was used to fit the curve, and the category factors are left out here: fitted on the pre-cut launches alone they are thin, and they score worse forward than the curve alone.' }),
+      el('p', { class: 'sub', text: 'The snapshot holds ' + a.total + ' protocols. The board ranks ' + DATA.board_size + ', the Excluded tab sets aside ' + DATA.excluded.length + ' pre-token protocols with their reasons, the Set aside tab lists the ' + DATA.live.length + ' live-token comps the curve is fitted from, and the remaining ' + (a.bad_mcap + a.no_mcap) + ' record a token but carry no usable market cap (' + a.bad_mcap + ' report 0 or \u22121, ' + a.no_mcap + ' none at all). Every protocol in the snapshot is accounted for.' }),
       scatterChart(),
       el('p', { class: 'sub', text: 'Each dot is one live-token protocol from the snapshot. The line is the fitted curve; the dashed lines are the middle half of launches around it. Big TVL sits below a flat multiple: rank 1 is ' + fmtUsd(top.implied_value_usd) + ' on the curve, against ' + fmtUsd(flatTop) + ' on one flat median multiple of ' + flatMed.toFixed(3) + '.' })
     );
@@ -680,7 +708,7 @@
       shell.appendChild(leaders());
       shell.appendChild(categoriesPanel());
       shell.appendChild(controls());
-      shell.appendChild(state.tab === 'pre-token' ? boardTable() : liveTable());
+      shell.appendChild(state.tab === 'pre-token' ? boardTable() : state.tab === 'live' ? liveTable() : excludedTable());
     }
     app.appendChild(shell);
     app.setAttribute('aria-busy', 'false');
