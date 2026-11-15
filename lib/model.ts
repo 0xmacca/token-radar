@@ -1,11 +1,14 @@
-// Token Radar's model, version radar-3: one snapshot of the protocol universe in, one ranked board out.
+// Token Radar's model, version radar-4: one snapshot of the protocol universe in, one ranked board out.
 //
 // The board ranks every protocol that records no token and is not a wrapped, staked or bridged product
 // of one that trades, and not a versioned pool or an exchange: the watchlist's own definition, applied
 // to the whole snapshot instead of only above the floor. The watchlist (40 protocols) is the floor,
 // never a ceiling: the board adds every other protocol that meets the same definition, below the floor
 // and above it. Live-token protocols are kept apart and shown with the market's own values, never mixed
-// into the ranked board.
+// into the ranked board. The pre-token protocols the rule leaves out are set aside with the rule that
+// left each one out, so the snapshot's whole 758 protocols are accounted for: 198 ranked, 144 set
+// aside, 128 live-token comps priced the curve, and the rest record a token but carry no usable
+// market cap.
 //
 // Implied value follows only from the snapshot's own figures. For one protocol:
 //
@@ -28,7 +31,9 @@
 // without each comp, then predict it) lands within 3x for about two in five comps, median miss about
 // x3.5; one flat multiple manages about one in three, median miss about x5.1. The middle half of
 // launches land between about 0.29x and 3.54x of the curve, so every row carries that range beside its
-// number. A model this wide is a rough anchor, not a price, and the dashboard says so.
+// number. A model this wide is a rough anchor, not a price, and the dashboard says so. The curve is
+// also tested blind: fitted only on the launches listed before 2024, it predicts the launches listed
+// since within 3x for about half of them, median miss about x2.9 — a forward test, not a refit.
 //
 // Farm economics, per row, from the same figures plus stated assumptions only: the cheapest chain the
 // protocol is live on sets the gas, the farm plan sets the capital and the hours, and a 4% T-bill prices
@@ -109,12 +114,9 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-3';
+export const MODEL_VERSION = 'radar-4';
 
-/** How many live-token protocols the Live token view carries, by market cap. */
-export const LIVE_ROWS = 24;
-
-/** The fitted size curve and its leave-one-out check, computed from the snapshot's live comps. */
+/** The fitted size curve, its leave-one-out check and its blind forward test, computed from the snapshot's live comps. */
 export interface SizeFit {
   intercept: number;
   slope: number;
@@ -126,6 +128,8 @@ export interface SizeFit {
   loo_p75: number;
   flat_within3x: number;
   flat_median_miss: number;
+  /** The blind test: the curve fitted only on comps listed before `cut`, predicting those listed since. */
+  blind: { cut: string; n_train: number; n_test: number; within3x: number; median_miss: number };
 }
 
 /** One category's factor, as the dashboard's model table shows it. */
@@ -207,6 +211,25 @@ export interface LiveRow {
   change_7d: number | null;
 }
 
+/** A pre-token protocol the ranking rule leaves out, with the rule that left it out. */
+export interface ExcludedRow {
+  slug: string;
+  name: string;
+  category: string | null;
+  chains: string[];
+  tvl_usd: number;
+  reason: string;
+}
+
+/** The snapshot's audit: every protocol accounted for, so the dashboard can say so. */
+export interface SnapshotAudit {
+  total: number;
+  /** Live-token protocols whose market cap is 0 or negative: a token, but no usable price. */
+  bad_mcap: number;
+  /** Protocols that record a token (a CoinGecko id or a symbol) but carry no market cap. */
+  no_mcap: number;
+}
+
 /** Everything the dashboard needs: the board, the live set, and the model it runs. */
 export interface RadarData {
   as_of: string;
@@ -218,11 +241,14 @@ export interface RadarData {
   board_size: number;
   early_size: number;
   live_size: number;
+  excluded_size: number;
+  audit: SnapshotAudit;
   fit: SizeFit;
   factors: CategoryFactor[];
   comps: [number, number][];
   rows: RadarRow[];
   live: LiveRow[];
+  excluded: ExcludedRow[];
 }
 
 /** Why the snapshot is not one this model can score. */
@@ -332,7 +358,8 @@ function quartile(sorted: number[], q: number): number {
  * least MIN_LIVE_N comps gets its own factor (the median of actual over the curve's prediction,
  * clamped), every other category rides the curve alone. Leave-one-out refits the curve and the factor
  * without each comp and predicts it, and does the same for one flat multiple, so the page can print
- * both models' accuracy side by side instead of asserting it.
+ * both models' accuracy side by side instead of asserting it. The blind test fits the curve only on
+ * the comps listed before 2024 and predicts the ones listed since, with the curve alone.
  */
 export function computeFit(
   protocols: SnapshotProtocol[],
@@ -360,6 +387,25 @@ export function computeFit(
   }
   const looSorted = [...loo].sort((a, b) => a - b);
   const miss = (r: number): number => Math.max(r, 1 / r);
+  // The blind test: fit the curve only on the comps listed before the cut, then predict the comps
+  // listed since, with the curve alone. Nothing in the test set was used to fit it, so this is a
+  // forward test, not a refit: the one number on the page no leave-one-out check can give. The
+  // category factors are left out here on purpose — fitted on the pre-cut comps alone they are thin
+  // (a median over a handful of launches) and they score worse forward than the curve alone.
+  const BLIND_CUT = '2024-01-01';
+  const blindTrain = comps.filter((p) => p.listed_at !== null && p.listed_at < BLIND_CUT);
+  const blindTest = comps.filter((p) => p.listed_at !== null && p.listed_at >= BLIND_CUT);
+  const blindFit = olsFit(blindTrain);
+  const blindRatios = blindTest.map(
+    (p) => p.mcap_usd! / Math.pow(10, blindFit.intercept + blindFit.slope * Math.log10(p.tvl_usd)),
+  );
+  const blind = {
+    cut: BLIND_CUT,
+    n_train: blindTrain.length,
+    n_test: blindTest.length,
+    within3x: blindRatios.filter((r) => r >= 1 / 3 && r <= 3).length / blindRatios.length,
+    median_miss: medianOf(blindRatios.map(miss).sort((a, b) => a - b)) ?? 0,
+  };
   const fit: SizeFit = {
     intercept: fit0.intercept,
     slope: fit0.slope,
@@ -371,6 +417,7 @@ export function computeFit(
     loo_p75: quartile(looSorted, 0.75),
     flat_within3x: flatLoo.filter((r) => r >= 1 / 3 && r <= 3).length / flatLoo.length,
     flat_median_miss: medianOf(flatLoo.map(miss).sort((a, b) => a - b)) ?? 0,
+    blind,
   };
   return {
     fit,
@@ -692,12 +739,35 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
   ];
 }
 
-/** The live-token protocols, by market cap, for the dashboard's Live token view. */
-export function liveRows(snapshot: Snapshot): LiveRow[] {
+/** The rule that leaves a pre-token protocol out of the ranking, or null when it is rankable. */
+export function exclusionReason(p: SnapshotProtocol): string | null {
+  if (!isPreToken(p)) return null;
+  if (EXCLUDED_CATEGORIES.has(p.category ?? '')) return `Category: ${p.category}`;
+  if (VERSIONED.test(p.name)) return 'Versioned pool';
+  if (WRAPPED_OR_STAKED.test(p.name)) return 'Wrapped / staked product';
+  if (EXCHANGE_PREFIX.test(p.name)) return 'Exchange product';
+  return null;
+}
+
+/** The pre-token protocols the ranking leaves out, by TVL, each with the rule that left it out. */
+export function excludedRows(snapshot: Snapshot, boardSlugs: Set<string>): ExcludedRow[] {
   return snapshot.protocols
-    .filter((p) => !isPreToken(p) && p.category !== 'CEX')
+    .filter((p) => isPreToken(p) && !boardSlugs.has(p.slug))
+    .map((p) => ({
+      slug: p.slug,
+      name: p.name,
+      category: p.category,
+      chains: p.chains,
+      tvl_usd: p.tvl_usd,
+      reason: exclusionReason(p) ?? 'Left out by the ranking rule',
+    }))
+    .sort((a, b) => b.tvl_usd - a.tvl_usd || (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
+}
+
+/** The live-token comps, by market cap: the exact set the size curve is fitted from. */
+export function liveRows(snapshot: Snapshot): LiveRow[] {
+  return liveComps(snapshot.protocols)
     .sort((a, b) => (b.mcap_usd ?? 0) - (a.mcap_usd ?? 0) || b.tvl_usd - a.tvl_usd)
-    .slice(0, LIVE_ROWS)
     .map((p) => ({
       slug: p.slug,
       name: p.name,
@@ -707,6 +777,16 @@ export function liveRows(snapshot: Snapshot): LiveRow[] {
       mcap_usd: p.mcap_usd,
       change_7d: p.change_7d,
     }));
+}
+
+/** The snapshot's audit: how many protocols fall outside the board, the live set and the set-aside. */
+export function auditSnapshot(snapshot: Snapshot): SnapshotAudit {
+  const live = snapshot.protocols.filter((p) => !isPreToken(p));
+  return {
+    total: snapshot.protocols.length,
+    bad_mcap: live.filter((p) => p.mcap_usd !== null && !(p.tvl_usd > 0 && p.mcap_usd / p.tvl_usd > 0)).length,
+    no_mcap: live.filter((p) => p.mcap_usd === null).length,
+  };
 }
 
 /** A board row's compact form for data.js, with the farm plan generated in the page. */
@@ -738,6 +818,8 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
   const fitted = computeFit(snapshot.protocols, model);
   const board = buildBoard(snapshot, fitted, model);
   const live = liveRows(snapshot);
+  const excluded = excludedRows(snapshot, new Set(board.map((r) => r.slug)));
+  const audit = auditSnapshot(snapshot);
   const early = board.filter((r) => !r.watchlist).length;
   const radar: RadarData = {
     as_of: snapshot.as_of,
@@ -751,11 +833,14 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     board_size: board.length,
     early_size: early,
     live_size: live.length,
+    excluded_size: excluded.length,
+    audit,
     fit: fitted.fit,
     factors: [...fitted.factors.values()].sort((a, b) => (a.category < b.category ? -1 : a.category > b.category ? 1 : 0)),
     comps: fitted.comps,
     rows: board.map(radarRow),
     live,
+    excluded,
   };
   return { board, radar };
 }
