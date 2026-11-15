@@ -1,7 +1,7 @@
 // Token Radar's entrypoint (Node 22, standard library only).
 //
 // It reads the sealed snapshot from /input/snapshot.json (or --input <file|dir>), scores every
-// launch-candidate protocol with the radar-2 model in lib/model.ts, writes the ranked board to
+// launch-candidate protocol with the radar-4 model in lib/model.ts, writes the ranked board to
 // /output/board.json, writes the dashboard's data beside the page as /output/data.js, copies this
 // repository's dashboard/ and screenshots/ to /output, and writes /output/dossier.json last, with the
 // vendored make.fun library, so the scorer can rebuild it byte for byte from what is handed in.
